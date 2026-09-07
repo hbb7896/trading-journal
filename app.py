@@ -1,87 +1,595 @@
 import streamlit as st
-import gspread
-from google.oauth2.service_account import Credentials
-from datetime import datetime
+import pandas as pd
+import numpy as np
+import yfinance as yf
+import FinanceDataReader as fdr
+import altair as alt
+from datetime import datetime, timedelta
+from streamlit_gsheets import GSheetsConnection
+import random
+# [NEW] AI 분석을 위한 라이브러리 추가
+import json
+import re  # [🔥 김프로 추가] 텍스트 거름망용 정규식 라이브러리
+import google.generativeai as genai
+from PIL import Image
 
-# 1. 구글 시트 연동 설정 (Streamlit Secrets 활용)
-scope = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
+# 1. 페이지 설정
+st.set_page_config(page_title="Trading Master Dashboard", page_icon="💎", layout="wide")
+
+# 2. 구글 시트 연결 (김프로 커스텀 우회로 적용 완)
+# 스트림릿 Secrets에서 google_json과 sheet_url을 불러와 다이렉트로 연결합니다.
+try:
+    gcp_cred = json.loads(st.secrets["google_json"])
+    conn = st.connection("gsheets", type=GSheetsConnection, service_account_info=gcp_cred, spreadsheet=st.secrets["sheet_url"])
+except Exception as e:
+    st.error(f"🚨 구글 시트 연결 설정 오류: {e}")
+    st.stop() # 에러 시 여기서 실행 멈춤
+
+# --- 설정값 & 상태 영구 저장/불러오기 (Worksheet 1 활용) ---
+def load_status():
+    """구글 시트 두 번째 탭(1)에서 설정과 기록을 불러옵니다."""
+    try:
+        df_config = conn.read(worksheet=1, ttl=0)
+        if df_config.empty:
+            return 20000000, 5000000, [] 
+        row = df_config.iloc[0]
+        equity = int(row.get('Total_Equity', 20000000))
+        max_pos = int(row.get('Max_Position', 5000000))
+        history_str = str(row.get('History', ''))
+        
+        if history_str and history_str != 'nan': history = history_str.split(',')
+        else: history = []
+        return equity, max_pos, history
+    except Exception:
+        return 20000000, 5000000, []
+
+def save_status(equity, max_pos, history):
+    """설정과 기록을 구글 시트 두 번째 탭(1)에 저장합니다."""
+    try:
+        history_str = ",".join(history)
+        df_config = conn.read(worksheet=1, ttl=0)
+        # 기존 데이터(11번탭 설정 등)가 날아가지 않게 덮어쓰기 방지 처리!
+        if not df_config.empty:
+            new_df = df_config.copy()
+            new_df.at[0, 'Total_Equity'] = equity
+            new_df.at[0, 'Max_Position'] = max_pos
+            new_df.at[0, 'History'] = history_str
+        else:
+            new_df = pd.DataFrame([{'Total_Equity': equity, 'Max_Position': max_pos, 'History': history_str}])
+        conn.update(worksheet=1, data=new_df)
+    except Exception as e:
+        st.error(f"저장 실패: {e}")
+
+# --- 설정값 불러오기 ---
+@st.cache_data(ttl=0)
+def load_settings():
+    try:
+        df = conn.read(worksheet=1, ttl=0)
+        if not df.empty: return df.iloc[0].to_dict()
+    except: pass
+    return {}
+
+saved_config = load_settings()
+
+# --- 한국 종목 리스트 ---
+@st.cache_data(ttl=3600)
+def get_krx_list():
+    try:
+        df = fdr.StockListing('KRX')
+        return df[['Code', 'Name', 'Market']]
+    except Exception as e:
+        return pd.DataFrame()
+
+# [오류 방지] 컬럼 목록 정의
+REQUIRED_COLUMNS = [
+    'Date', 'Ticker', 'Buy_Amount', 'Sell_Amount', 'P_L_Amount', 
+    'ROI_Percent', 'Mistake_Tags', 'Emotion', 'Discipline', 'Memo'
 ]
 
-@st.cache_resource
-def get_google_sheet():
+def load_data():
     try:
-        # 스트림릿 시크릿에 등록된 인증 정보를 가져옵니다.
-        creds_dict = dict(st.secrets["gcp_service_account"])
-        creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
-        client = gspread.authorize(creds)
+        df = conn.read(worksheet=0, ttl=0)
+        if df.empty: return pd.DataFrame(columns=REQUIRED_COLUMNS)
+        df = df.dropna(subset=['Date'])
         
-        # '매매일지'라는 이름의 구글 스프레드시트를 연동합니다.
-        sheet = client.open("매매일지").sheet1
-        return sheet
-    except Exception as e:
-        return None
+        num_cols = ['P_L_Amount', 'ROI_Percent', 'Buy_Amount', 'Sell_Amount']
+        for col in num_cols:
+            if col in df.columns:
+                df[col] = df[col].astype(str).str.replace(',', '').str.replace('%', '')
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+        
+        df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+        if 'Buy_Amount' not in df.columns: df['Buy_Amount'] = 0.0
+        if 'Sell_Amount' not in df.columns: df['Sell_Amount'] = 0.0
+        
+        mask = (df['Buy_Amount'] == 0) & (df['ROI_Percent'] != 0)
+        df.loc[mask, 'Buy_Amount'] = (df.loc[mask, 'P_L_Amount'] / (df.loc[mask, 'ROI_Percent'] / 100)).abs()
+        df.loc[mask, 'Sell_Amount'] = df.loc[mask, 'Buy_Amount'] + df.loc[mask, 'P_L_Amount']
 
-st.title("📈 제이슨 대표님의 추세추종 매매일지")
-st.subheader("마크 미너비니 & 윌리엄 오닐 트레이딩 시스템 (with 구글 시트)")
+        for col in ['Mistake_Tags', 'Emotion', 'Discipline', 'Memo']:
+            if col not in df.columns: df[col] = None
+        return df
+    except:
+        return pd.DataFrame(columns=REQUIRED_COLUMNS)
 
-sheet = get_google_sheet()
+# 최초 화면 로딩 시 데이터 원본 캐싱 (철벽 방어에 활용됨)
+df = load_data()
+krx_list = get_krx_list() 
 
-if sheet is None:
-    st.error("⚠️ 구글 시트 연결에 실패했습니다! 스트림릿 Secrets 설정을 확인해 주세요.")
-else:
-    with st.form("trade_form"):
-        st.write("### 🎯 신규 매수 타점 기록")
-        
-        col_a, col_b = st.columns(2)
-        with col_a:
-            trade_date = st.date_input("매수 일자", value=datetime.today())
-        with col_b:
-            ticker = st.text_input("종목명 (예: 삼성전자, 테슬라)")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            buy_price = st.number_input("매수가 (₩)", min_value=0, step=100)
-        with col2:
-            stop_loss = st.number_input("초기 손절가 (₩)", min_value=0, step=100)
-            
-        st.write("### ✅ 핵심 돌파 조건 체크")
-        vcp_check = st.checkbox("VCP (변동성 축소 패턴) 완성되었는가?")
-        darvas_check = st.checkbox("다바스 박스 상단 돌파 (거래량 동반)인가?")
-        
-        memo = st.text_area("매매 반성 및 코멘트 (심리 상태, 주도주 여부 등)")
-        
-        submit_button = st.form_submit_button("구글 시트에 일지 저장하기")
+# ==========================================
+# 사이드바: AI 영수증 캡쳐 분석 모듈
+# ==========================================
+st.sidebar.header("📸 AI 영수증 자동 입력")
+with st.sidebar.expander("🤖 캡쳐 화면 올리기", expanded=False):
+    st.markdown("수익/손실 화면을 올리면 알아서 타이핑해드립니다.")
+    api_key = st.text_input("Gemini API Key (최초 1회 입력)", type="password", key="sidebar_api")
+    uploaded_file = st.file_uploader("증권사 캡쳐 이미지", type=['png', 'jpg', 'jpeg'], key="sidebar_uploader")
+    
+    if st.button("🔍 데이터 추출하기", use_container_width=True):
+        if not api_key:
+            st.error("Gemini API Key가 필요합니다.")
+        elif not uploaded_file:
+            st.error("이미지를 올려주세요.")
+        else:
+            with st.spinner("김 프로가 캡쳐를 분석 중입니다..."):
+                try:
+                    clean_api_key = api_key.strip()
+                    genai.configure(api_key=clean_api_key)
+                    model = genai.GenerativeModel('gemini-2.5-flash')
+                    
+                    # [🔥 김프로 긴급 수술 부위: 이미지 다이어트 (속도 폭발적 향상)]
+                    img = Image.open(uploaded_file)
+                    if img.mode != 'RGB':
+                        img = img.convert('RGB')
+                    # 폰 캡쳐 원본은 해상도가 너무 커서 API 전송 시 병목이 발생합니다.
+                    # 비율을 유지하며 최대 800픽셀로 크기를 확 줄여서 전송 속도를 높입니다.
+                    img.thumbnail((800, 800)) 
+                    
+                    prompt = """
+                    당신은 한국 주식 증권사 앱의 캡쳐 화면을 분석하는 최고 수준의 AI 트레이딩 보조입니다.
+                    이미지에서 다음 3가지 데이터를 반드시 추출하세요.
+                    1. 종목명 (예: 두산퓨얼셀)
+                    2. 매수금액 (콤마(,)를 모두 제거한 순수 숫자만. 예: 2991450)
+                    3. 수익률(%) (콤마(,) 및 % 기호를 제거한 순수 숫자만. 예: 0.04)
 
-    if submit_button:
+                    [중요 규칙 - 수익률이 없을 때]
+                    화면에 '수익률(%)'이 직접 적혀있지 않고 '손익금액'과 '매수금액'만 있다면, 당신이 직접 수익률을 계산하세요!
+                    * 계산식: (손익금액 / 매수금액) * 100
+                    * 소수점 셋째 자리에서 반올림하여 둘째 자리까지만 출력하세요.
+                    
+                    결과는 반드시 아래 JSON 형식으로만 출력하세요. 다른 설명은 절대 추가하지 마세요.
+                    {"ticker": "두산퓨얼셀", "buy_amount": 2991450, "roi": 0.04, "memo": "AI 스캔 완료"}
+                    """
+                    response = model.generate_content([prompt, img])
+                    
+                    if not response.parts:
+                        st.error("🚨 AI가 응답을 반환하지 않았습니다. 이미지가 명확하지 않거나 필터에 걸렸을 수 있습니다.")
+                    else:
+                        result_text = response.text.strip()
+                        
+                        # 정규식으로 순수 JSON 데이터만 딱 뜯어내기
+                        match = re.search(r'\{.*\}', result_text, re.DOTALL)
+                        if match:
+                            clean_json = match.group(0)
+                        else:
+                            clean_json = result_text 
+                            
+                        data = json.loads(clean_json)
+                        
+                        st.session_state.ai_ticker = data.get('ticker', '')
+                        buy_amt_raw = str(data.get('buy_amount', 0)).replace(',', '')
+                        st.session_state.ai_buy_amt = int(float(buy_amt_raw))
+                        
+                        roi_raw = str(data.get('roi', 0.0)).replace(',', '').replace('%', '')
+                        st.session_state.ai_roi = float(roi_raw)
+                        
+                        st.session_state.ai_memo = data.get('memo', '📸 AI 분석 자동 입력')
+                        
+                        # 폼 강제 업데이트 트리거 작동!
+                        if 'form_reset_trigger' not in st.session_state:
+                            st.session_state.form_reset_trigger = 0
+                        st.session_state.form_reset_trigger += 1
+                        
+                        st.success("✅ 분석 성공! 아래 폼에 입력되었습니다.")
+                    
+                except Exception as e:
+                    error_msg = str(e)
+                    if "429" in error_msg or "quota" in error_msg.lower():
+                        st.error("🚨 무료 API 호출 제한(1분당 5회) 초과!")
+                        st.warning("사장님! 구글 서버가 너무 빠른 요청에 놀라 잠시 문을 닫았습니다. 딱 1분만 기다리셨다가 다시 버튼을 눌러주십시오! ☕")
+                    else:
+                        st.error("🚨 해독 실패! AI가 엉뚱 대답을 했습니다. 캡쳐 이미지를 다시 확인해주세요.")
+                        with st.expander("🛠️ 김 프로 디버깅 (에러 원인 보기)"):
+                            st.write(f"시스템 에러: {e}")
+                            if 'result_text' in locals():
+                                st.write("AI가 뱉은 원본 데이터:", result_text)
+
+# AI가 뽑아둔 데이터가 있으면 가져오고, 없으면 기본값 세팅
+if 'form_reset_trigger' not in st.session_state:
+    st.session_state.form_reset_trigger = 0
+    
+def_ticker = st.session_state.get('ai_ticker', '')
+def_buy_amt = int(st.session_state.get('ai_buy_amt', 0))
+def_roi = float(st.session_state.get('ai_roi', 0.0))
+def_memo = st.session_state.get('ai_memo', '')
+fc = st.session_state.form_reset_trigger # 폼 고유 키값 생성용
+
+# --- 사이드바 입력 ---
+st.sidebar.markdown("---")
+st.sidebar.header("📝 매매 기록 입력")
+with st.sidebar.form("quick_input", clear_on_submit=True):
+    date = st.date_input("일자", datetime.today())
+    
+    # fc 변수를 활용해 강제로 새로운 값 밀어넣기
+    ticker = st.text_input("종목명 (예: 삼성전자)", value=def_ticker, key=f"t_{fc}").strip()
+    
+    st.markdown("---")
+    
+    # 1. 매수 금액 입력
+    buy_amt = st.number_input("총 매수 금액 (원)", value=def_buy_amt, step=100000, key=f"b_{fc}")
+    
+    # 2. 수익률 입력
+    roi = st.number_input("수익률 (%)", value=def_roi, format="%.2f", key=f"r_{fc}")
+    
+    # 변수 초기화 및 자동 계산
+    sell_amt = 0.0
+    pn_l = 0.0
+
+    if buy_amt != 0:
+        pn_l = buy_amt * (roi / 100)
+        sell_amt = buy_amt + pn_l
+        
+        # 계산 결과 미리보기
+        st.info(f"""
+        🧮 **자동 계산 결과**
+        - 수익금: {pn_l:,.0f}원
+        - 매도금액: {sell_amt:,.0f}원
+        """)
+
+    st.markdown("---")
+    memo = st.text_input("메모 (특이사항 등)", value=def_memo, key=f"m_{fc}")
+    
+    if st.form_submit_button("기록 저장"):
         if ticker:
-            try:
-                # 시트에 기록할 데이터 행 구성
-                row_data = [
-                    str(trade_date),
-                    ticker,
-                    buy_price,
-                    stop_loss,
-                    "O" if vcp_check else "X",
-                    "O" if darvas_check else "X",
-                    memo
-                ]
-                sheet.append_row(row_data)
-                st.success(f"[{ticker}] 매매일지가 구글 시트에 안전하게 박제되었습니다! 🫡")
-            except Exception as e:
-                st.error(f"저장 중 오류 발생: {e}")
-        else:
-            st.warning("대표님, 종목명을 입력해 주십시오!")
+            with st.spinner("안전하게 암호화하여 저장 중입니다... 🛡️"):
+                try:
+                    new_data = pd.DataFrame([{
+                        'Date': date.strftime('%Y-%m-%d'), 
+                        'Ticker': ticker, 
+                        'Buy_Amount': buy_amt, 
+                        'Sell_Amount': sell_amt,
+                        'P_L_Amount': pn_l, 
+                        'ROI_Percent': roi, 
+                        'Mistake_Tags': None,
+                        'Emotion': None,
+                        'Discipline': None,
+                        'Memo': memo
+                    }])
+                    
+                    live_df = conn.read(worksheet=0, ttl=0)
+                    
+                    if live_df.empty and not df.empty:
+                        safe_df = df.copy() 
+                        safe_df['Date'] = pd.to_datetime(safe_df['Date']).dt.strftime('%Y-%m-%d')
+                        updated_df = pd.concat([safe_df, new_data], ignore_index=True)
+                        st.toast("⚠️ 일시적인 통신 지연을 감지하여 안전 모드로 백업 데이터를 활용해 저장했습니다.")
+                    elif not live_df.empty:
+                        live_df['Date'] = pd.to_datetime(live_df['Date']).dt.strftime('%Y-%m-%d')
+                        updated_df = pd.concat([live_df, new_data], ignore_index=True)
+                    else:
+                        updated_df = new_data
+                        
+                    conn.update(worksheet=0, data=updated_df)
+                    
+                    # 저장 후 AI 기록 찌꺼기 초기화
+                    if 'ai_ticker' in st.session_state:
+                        st.session_state.ai_ticker = ""
+                        st.session_state.ai_buy_amt = 0
+                        st.session_state.ai_roi = 0.0
+                        st.session_state.ai_memo = ""
+                        
+                    st.success(f"✅ {ticker} 완벽하게 저장 완료! (수익률 {roi:.2f}%)")
+                    st.rerun()
+                    
+                except Exception as e:
+                    st.error(f"🚨 심각한 통신 오류 감지! 원본 데이터 보호를 위해 저장을 차단했습니다. 새로고침 후 다시 시도하세요.")
+                    st.write(f"에러 내용: {e}")
+        else: 
+            st.error("종목명을 입력해주세요.")
 
-    # 3. 기존에 기록된 매매일지 불러와서 화면에 띄우기
-    st.divider()
-    st.write("### 📊 나의 최근 매매일지 아카이브")
-    try:
-        data = sheet.get_all_records()
-        if data:
-            st.dataframe(data)
+if krx_list.empty: st.sidebar.caption("⚠️ 리스트 로딩 실패")
+else: st.sidebar.caption(f"✅ {len(krx_list):,}개 종목 연결됨")
+
+# --- 메인 화면 ---
+st.title("💎 Trading Master Dashboard")
+
+if not df.empty:
+    
+    # [🔥 김프로 전역 수술 부위: 모든 탭에서 공통으로 쓸 텍스트 컬러 함수 배치]
+    def color_profit_loss(val):
+        try:
+            if pd.isna(val): return ''
+            if float(val) > 0: return 'color: #FF4444; font-weight: bold;' # 수익은 붉은색
+            elif float(val) < 0: return 'color: #0066CC; font-weight: bold;' # 손실은 푸른색
+        except: pass
+        return ''
+
+    # 탭 구성: 총 7개 (사용하지 않는 2개 탭 삭제 반영)
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+        "📊 차트", "📅 월별", "📆 연도별", "📋 원본", 
+        "⚖️ 빅터 스페란데오", "🎯 R-배수 분석", "🔔 손익 분포"
+    ])
+    
+    df['Year'] = df['Date'].dt.year
+    df['YearMonth'] = df['Date'].dt.strftime('%Y-%m')
+    
+    total_trades = len(df)
+    wins = df[df['ROI_Percent'] > 0]
+    losses = df[df['ROI_Percent'] <= 0]
+    win_rate = (len(wins) / total_trades) * 100 if total_trades > 0 else 0
+    avg_win = wins['ROI_Percent'].mean() if not wins.empty else 0
+    avg_loss = abs(losses['ROI_Percent'].mean()) if not losses.empty else 0
+    risk_reward_ratio = avg_win / avg_loss if avg_loss > 0 else 0
+    avg_roi = df['ROI_Percent'].mean()
+
+    # === TAB 1: 차트 ===
+    with tab1:
+        st.subheader("🏆 전체 종합 성적표 (Total Legend)")
+        total_pl = df['P_L_Amount'].sum()
+        total_cnt = len(df)
+        all_wins = df[df['ROI_Percent'] > 0]
+        all_losses = df[df['ROI_Percent'] <= 0]
+        
+        gross_p = all_wins['P_L_Amount'].sum()
+        gross_l = abs(all_losses['P_L_Amount'].sum())
+        total_pf = gross_p / gross_l if gross_l > 0 else 0
+        
+        all_avg_profit_amt = all_wins['P_L_Amount'].mean() if not all_wins.empty else 0
+        all_avg_loss_amt = abs(all_losses['P_L_Amount'].mean()) if not all_losses.empty else 0
+        money_rr_ratio = all_avg_profit_amt / all_avg_loss_amt if all_avg_loss_amt > 0 else 0
+        
+        all_avg_profit_pct = all_wins['ROI_Percent'].mean() if not all_wins.empty else 0
+        all_avg_loss_pct = abs(all_losses['ROI_Percent'].mean()) if not all_losses.empty else 0
+        period_rr_ratio = all_avg_profit_pct / all_avg_loss_pct if all_avg_loss_pct > 0 else 0
+        
+        win_prob = (len(all_wins) / total_cnt) if total_cnt > 0 else 0
+        loss_prob = 1 - win_prob
+        expectancy = (win_prob * all_avg_profit_pct) - (loss_prob * all_avg_loss_pct)
+
+        # 켈리 기준 (Kelly Criterion) 계산 로직
+        if money_rr_ratio > 0:
+            kelly_fraction = win_prob - (loss_prob / money_rr_ratio)
+            kelly_pct = max(0.0, kelly_fraction * 100) 
         else:
-            st.info("아직 기록된 매매일지가 없습니다. 첫 타점을 기록해 보십시오!")
-    except Exception as e:
-        st.write("시트 데이터를 불러오는 중입니다...")
+            kelly_pct = 0.0
+            
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("💰 누적 총 손익", f"{total_pl:,.0f}원")
+        m2.metric("🎯 전체 승률", f"{win_rate:.1f}%", help="총 매매 횟수 중 수익을 낸 매매의 비율입니다.")
+        m3.metric("🔮 기간 기댓값 (Edge)", f"{expectancy:.2f}%", help="(승률 × 평균수익%) - (패율 × 평균손실%). 매매를 한 번 할 때마다 계좌가 평균적으로 몇 %씩 성장하는지 보여주는 '수학적 우위'입니다.")
+        m4.metric("💎 Profit Factor", f"{total_pf:.2f}", help="총 이익금 ÷ 총 손실금. '번 돈이 잃은 돈보다 몇 배 많은가?'를 나타냅니다. 1.5 이상이면 훌륭하고, 3.0 이상이면 초고수입니다.")
+        m5.metric("⚖️ 켈리 베팅 비중", f"{kelly_pct:.1f}%", help="켈리 공식: 사장님의 현재 승률과 손익비를 바탕으로, 계좌를 가장 안전하고 빠르게 불릴 수 있는 '1회 매매당 최적의 자산 투입 비중'입니다.")
+        
+        st.divider()
+        st.markdown("##### 💵 금액(Money) 성적표 (배짱)")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("평균 수익금", f"{all_avg_profit_amt:,.0f}원")
+        c2.metric("평균 손실금", f"{all_avg_loss_amt:,.0f}원")
+        c3.metric("⚖️ 금액 손익비", f"{money_rr_ratio:.2f}", delta="Good" if money_rr_ratio > 2 else "Bad" if money_rr_ratio < 1 else None, help="평균 수익금 ÷ 평균 손실금. 이 수치가 높다면 '이길 때 크게 베팅(불타기)'을 잘하고 있다는 뜻입니다.")
+        c4.metric("🛒 총 매수 대금", f"{df['Buy_Amount'].sum():,.0f}원")
+
+        st.markdown("##### 📊 기간(Technical) 성적표 (기술)")
+        c5, c6, c7, c8 = st.columns(4)
+        c5.metric("평균 수익률", f"+{all_avg_profit_pct:.2f}%")
+        c6.metric("평균 손실률", f"-{all_avg_loss_pct:.2f}%")
+        c7.metric("⚖️ 기간 손익비", f"{period_rr_ratio:.2f}", delta="Good" if period_rr_ratio > 2 else "Bad" if period_rr_ratio < 1 else None, help="평균 수익률(%) ÷ 평균 손실률(%). 순수한 차트 분석 및 타점 능력을 보여줍니다.")
+        c8.metric("📝 총 거래 횟수", f"{total_cnt:,}회")
+
+        st.divider()
+        st.subheader("🚀 내 계좌 vs KOSPI 지수")
+        daily_df = df.groupby('Date')['P_L_Amount'].sum().reset_index().sort_values('Date')
+        daily_df['Cumulative'] = daily_df['P_L_Amount'].cumsum()
+        try:
+            start = daily_df['Date'].min().strftime('%Y-%m-%d')
+            kospi = yf.download("^KS11", start=start, progress=False)['Close'].reset_index()
+            kospi.columns = ['Date', 'KOSPI']
+            kospi['Date'] = pd.to_datetime(kospi['Date']).dt.tz_localize(None)
+            base = alt.Chart(daily_df).encode(x='Date:T')
+            my_chart = base.mark_line(color='#00AA00', strokeWidth=3).encode(y=alt.Y('Cumulative:Q', title='내 수익'), tooltip=['Date', 'Cumulative'])
+            kospi_chart = alt.Chart(kospi).mark_line(color='#FF4444', strokeDash=[5,5]).encode(x='Date:T', y=alt.Y('KOSPI:Q', title='KOSPI', scale=alt.Scale(zero=False)))
+            st.altair_chart(alt.layer(my_chart, kospi_chart).resolve_scale(y='independent'), use_container_width=True)
+        except: st.line_chart(daily_df.set_index('Date')['Cumulative'])
+        st.subheader("📊 월별 손익 흐름")
+        st.bar_chart(df.groupby('YearMonth')['P_L_Amount'].sum())
+
+    # === TAB 2: 월별 ===
+    with tab2:
+        st.subheader("📅 월별 상세 성적표", help="💡 **PF (Profit Factor) 수치 가이드**\n\n총 수익금을 총 손실금으로 나눈 값입니다. '내가 잃은 돈 대비 몇 배를 벌었는가?'를 나타냅니다.\n\n- **1.0 미만** : 손실 상태 (원칙 점검 필요!)\n- **1.0 ~ 1.5** : 양호 (수익 누적 중)\n- **1.5 ~ 2.0** : 우수 (훌륭한 매매 전략)\n- **2.0 이상** : 전설 (초고수의 영역)")
+        monthly_stats = []
+        for ym, group in df.groupby('YearMonth'):
+            g_wins = group[group['ROI_Percent'] > 0]; g_losses = group[group['ROI_Percent'] <= 0]
+            gross_profit = group[group['P_L_Amount'] > 0]['P_L_Amount'].sum()
+            gross_loss = abs(group[group['P_L_Amount'] <= 0]['P_L_Amount'].sum())
+            m_avg_profit_amt = group[group['P_L_Amount'] > 0]['P_L_Amount'].mean() if not group[group['P_L_Amount'] > 0].empty else 0
+            m_avg_loss_amt = group[group['P_L_Amount'] <= 0]['P_L_Amount'].mean() if not group[group['P_L_Amount'] <= 0].empty else 0
+            pf = gross_profit / gross_loss if gross_loss > 0 else 0
+            m_avg_gain_pct = g_wins['ROI_Percent'].mean() if not g_wins.empty else 0
+            m_avg_loss_pct = abs(g_losses['ROI_Percent'].mean()) if not g_losses.empty else 0
+            m_wl_ratio = m_avg_gain_pct / m_avg_loss_pct if m_avg_loss_pct > 0 else 0
+            m_buy_vol = group['Buy_Amount'].sum()
+            m_count = len(group)
+            
+            # 기대수익 계산 로직 (월별)
+            win_prob = len(g_wins) / m_count if m_count > 0 else 0
+            loss_prob = 1 - win_prob
+            m_expectancy = (win_prob * m_avg_gain_pct) - (loss_prob * m_avg_loss_pct)
+            
+            monthly_stats.append({"기간": str(ym), "총 손익": float(group['P_L_Amount'].sum()), "평균수익": float(m_avg_profit_amt), "평균손실": float(m_avg_loss_amt), "거래횟수": int(m_count), "승률": float(win_prob*100), "손익비": float(m_wl_ratio), "PF": float(pf), "기대수익": float(m_expectancy), "매수총액": float(m_buy_vol)})
+        
+        # [🔥 김프로 수술 부위: 월별 표 백그라운드 색상 제거 & 텍스트 컬러 통일 적용]
+        df_monthly = pd.DataFrame(monthly_stats).sort_values("기간", ascending=False)
+        format_dict_m = {
+            "총 손익": "{:+,.0f}원", 
+            "평균수익": "{:,.0f}원", 
+            "평균손실": "{:,.0f}원", 
+            "거래횟수": "{:,}회", 
+            "승률": "{:.1f}%", 
+            "손익비": "{:.2f}", 
+            "PF": "{:.2f}", 
+            "기대수익": "{:+.2f}%", 
+            "매수총액": "{:,.0f}원"
+        }
+        
+        try:
+            styled_monthly = df_monthly.style.map(color_profit_loss, subset=['총 손익', '기대수익']).format(format_dict_m)
+        except AttributeError:
+            styled_monthly = df_monthly.style.applymap(color_profit_loss, subset=['총 손익', '기대수익']).format(format_dict_m)
+            
+        st.dataframe(styled_monthly, use_container_width=True)
+
+    # === TAB 3: 연도별 ===
+    with tab3:
+        st.subheader("📆 연도별 종합 성적표")
+        yearly_stats = []
+        for y, group in df.groupby('Year'):
+            g_wins = group[group['ROI_Percent'] > 0]; g_losses = group[group['ROI_Percent'] <= 0]
+            gross_profit = group[group['P_L_Amount'] > 0]['P_L_Amount'].sum()
+            gross_loss = abs(group[group['P_L_Amount'] <= 0]['P_L_Amount'].sum())
+            y_avg_profit_amt = group[group['P_L_Amount'] > 0]['P_L_Amount'].mean() if not group[group['P_L_Amount'] > 0].empty else 0
+            y_avg_loss_amt = group[group['P_L_Amount'] <= 0]['P_L_Amount'].mean() if not group[group['P_L_Amount'] <= 0].empty else 0
+            pf = gross_profit / gross_loss if gross_loss > 0 else 0
+            y_avg_gain_pct = g_wins['ROI_Percent'].mean() if not g_wins.empty else 0
+            y_avg_loss_pct = abs(g_losses['ROI_Percent'].mean()) if not g_losses.empty else 0
+            y_wl_ratio = y_avg_gain_pct / y_avg_loss_pct if y_avg_loss_pct > 0 else 0
+            y_buy_vol = group['Buy_Amount'].sum()
+            y_count = len(group)
+            
+            # 기대수익 계산 로직 (연도별)
+            win_prob = len(g_wins) / y_count if y_count > 0 else 0
+            loss_prob = 1 - win_prob
+            y_expectancy = (win_prob * y_avg_gain_pct) - (loss_prob * y_avg_loss_pct)
+            
+            yearly_stats.append({"연도": int(y), "총 손익": float(group['P_L_Amount'].sum()), "평균수익": float(y_avg_profit_amt), "평균손실": float(y_avg_loss_amt), "거래횟수": int(y_count), "승률": float(win_prob*100), "손익비": float(y_wl_ratio), "PF": float(pf), "기대수익": float(y_expectancy), "매수총액": float(y_buy_vol)})
+            
+        # [🔥 김프로 수술 부위: 연도별 표 백그라운드 색상 제거 & 텍스트 컬러 통일 적용]
+        df_yearly = pd.DataFrame(yearly_stats).sort_values("연도", ascending=False)
+        format_dict_y = {
+            "총 손익": "{:+,.0f}원", 
+            "평균수익": "{:,.0f}원", 
+            "평균손실": "{:,.0f}원", 
+            "거래횟수": "{:,}회", 
+            "승률": "{:.1f}%", 
+            "손익비": "{:.2f}", 
+            "PF": "{:.2f}", 
+            "기대수익": "{:+.2f}%", 
+            "매수총액": "{:,.0f}원"
+        }
+        
+        try:
+            styled_yearly = df_yearly.style.map(color_profit_loss, subset=['총 손익', '기대수익']).format(format_dict_y)
+        except AttributeError:
+            styled_yearly = df_yearly.style.applymap(color_profit_loss, subset=['총 손익', '기대수익']).format(format_dict_y)
+            
+        st.dataframe(styled_yearly, use_container_width=True)
+
+    # === TAB 4: 원본 ===
+    with tab4: 
+        df_sorted = df.sort_values('Date', ascending=False)
+        
+        # [🔥 김프로 수술 부위: 전역 컬러 함수 그대로 가져다 씀]
+        try:
+            styled_df = df_sorted.style.map(color_profit_loss, subset=['ROI_Percent', 'P_L_Amount']).format({
+                'ROI_Percent': '{:+.2f}%',
+                'P_L_Amount': '{:+,.0f}'
+            })
+        except AttributeError:
+            styled_df = df_sorted.style.applymap(color_profit_loss, subset=['ROI_Percent', 'P_L_Amount']).format({
+                'ROI_Percent': '{:+.2f}%',
+                'P_L_Amount': '{:+,.0f}'
+            })
+            
+        st.dataframe(styled_df, use_container_width=True)
+
+    # === TAB 5: 빅터 스페란데오 ===
+    with tab5:
+        st.subheader("⚖️ Victor Sperandeo's Reward-to-Risk Analysis")
+        st.markdown("> **\"최소 3:1의 보상 비율이 나오지 않는 거래는 시작조차 하지 마라.\"** - Victor Sperandeo")
+        vic_period = st.radio("📅 분석 기간 선택", ["전체", "최근 1개월", "최근 3개월", "최근 6개월", "최근 1년"], horizontal=True, key="vic_radio")
+        vic_df = df.copy()
+        today = datetime.today()
+        if vic_period == "최근 1개월": vic_df = vic_df[vic_df['Date'] >= (today - timedelta(days=30))]
+        elif vic_period == "최근 3개월": vic_df = vic_df[vic_df['Date'] >= (today - timedelta(days=90))]
+        elif vic_period == "최근 6개월": vic_df = vic_df[vic_df['Date'] >= (today - timedelta(days=180))]
+        elif vic_period == "최근 1년": vic_df = vic_df[vic_df['Date'] >= (today - timedelta(days=365))]
+        if not vic_df.empty:
+            v_wins = vic_df[vic_df['ROI_Percent'] > 0]; v_losses = vic_df[vic_df['ROI_Percent'] <= 0]
+            v_win_rate = (len(v_wins) / len(vic_df)) * 100
+            v_avg_win = v_wins['ROI_Percent'].mean() if not v_wins.empty else 0
+            v_avg_loss = abs(v_losses['ROI_Percent'].mean()) if not v_losses.empty else 0
+            v_rr_ratio = v_avg_win / v_avg_loss if v_avg_loss > 0 else 0
+            v_win_prob = v_win_rate / 100; v_loss_prob = 1 - v_win_prob
+            v_expectancy = (v_win_prob * v_avg_win) - (v_loss_prob * v_avg_loss)
+            st.caption(f"🔎 **{vic_period}** 데이터 기준 분석 ({len(vic_df)}건)")
+            c1, c2, c3 = st.columns(3)
+            with c1: st.metric("기간 손익비 (R/R)", f"{v_rr_ratio:.2f} : 1", delta="목표 달성" if v_rr_ratio >= 3.0 else "목표 미달", help="빅터 스페란데오는 진입 전 기대 수익이 손절폭의 최소 3배 이상인 자리만 매매하라고 했습니다.")
+            with c2: st.metric("기간 기댓값 (Edge)", f"{v_expectancy:.2f}%", help="이 매매 규칙을 계속 반복했을 때, 평균적으로 기대할 수 있는 수익률입니다.")
+            with c3: st.metric("빅터의 목표 기준", "3.0 : 1", help="손실 1일 때, 수익 3을 목표로 한다는 뜻입니다.")
+            st.divider()
+            target_roi_period = v_avg_loss * 3 if v_avg_loss > 0 else 10
+            conditions = [(vic_df['ROI_Percent'] >= target_roi_period), (vic_df['ROI_Percent'] > 0)]
+            colors = ["#00CC00", "#F1C40F"]
+            vic_df['Color_Hex'] = np.select(conditions, colors, default="#FF4B4B")
+            scatter_chart = alt.Chart(vic_df).mark_circle(size=100).encode(x=alt.X('Date', title='거래 일자'), y=alt.Y('ROI_Percent', title='수익률 (%)'), color=alt.Color('Color_Hex', scale=None, legend=None), tooltip=['Ticker', 'Date', 'ROI_Percent', 'P_L_Amount']).interactive()
+            rule_line = alt.Chart(pd.DataFrame({'y': [target_roi_period]})).mark_rule(color='blue', strokeDash=[3,3]).encode(y='y')
+            st.altair_chart(scatter_chart + rule_line, use_container_width=True)
+        else: st.info(f"📭 선택하신 **{vic_period}**에는 매매 기록이 없습니다.")
+
+    # === TAB 6: R-배수 분석 ===
+    with tab6:
+        st.subheader("🎯 R-배수 분석 (The Real Score)")
+        st.markdown("**'R'은 나의 위험(Risk) 단위입니다.**")
+        r_period = st.radio("📅 분석 기간 선택", ["전체", "최근 1개월", "최근 3개월", "최근 6개월", "최근 1년"], horizontal=True, key="r_radio")
+        r_df = df.copy()
+        today = datetime.today()
+        if r_period == "최근 1개월": r_df = r_df[r_df['Date'] >= (today - timedelta(days=30))]
+        elif r_period == "최근 3개월": r_df = r_df[r_df['Date'] >= (today - timedelta(days=90))]
+        elif r_period == "최근 6개월": r_df = r_df[r_df['Date'] >= (today - timedelta(days=180))]
+        elif r_period == "최근 1년": r_df = r_df[r_df['Date'] >= (today - timedelta(days=365))]
+        if not r_df.empty:
+            r_losses = r_df[r_df['P_L_Amount'] < 0]
+            if not r_losses.empty: avg_loss_abs = abs(r_losses['P_L_Amount'].mean())
+            else: all_losses = df[df['P_L_Amount'] < 0]; avg_loss_abs = abs(all_losses['P_L_Amount'].mean()) if not all_losses.empty else 1
+            r_df['R_Value'] = r_df['P_L_Amount'] / avg_loss_abs
+            c1, c2, c3 = st.columns(3)
+            c1.metric(f"나의 1R ({r_period})", f"{avg_loss_abs:,.0f}원", help="내가 한 번 손절할 때 잃는 평균 금액입니다. 이것을 '1R'이라는 위험 단위로 사용합니다.")
+            c2.metric("평균 R-배수", f"{r_df['R_Value'].mean():.2f}R", help="수익을 냈을 때, 평소 손실금(1R)의 몇 배를 벌었는지 나타냅니다. 예를 들어 2R이면 '손절금의 2배를 벌었다'는 뜻입니다.")
+            c3.metric("최고 R-배수", f"{r_df['R_Value'].max():.2f}R", help="기간 내 가장 크게 번 수익이 손절금의 몇 배인지 보여줍니다. 홈런의 크기입니다.")
+            st.divider()
+            df_sorted_r = r_df.sort_values('Date').copy()
+            df_sorted_r['Cumulative_R'] = df_sorted_r['R_Value'].cumsum()
+            df_sorted_r['Trade_Num'] = range(1, len(df_sorted_r) + 1)
+            line_r = alt.Chart(df_sorted_r).mark_line(color='blue').encode(x=alt.X('Trade_Num', title='거래 횟수'), y=alt.Y('Cumulative_R', title='누적 R'), tooltip=['Date', 'R_Value', 'Cumulative_R'])
+            st.altair_chart(line_r, use_container_width=True)
+        else: st.info(f"📭 선택하신 **{r_period}**에는 매매 기록이 없습니다.")
+
+    # === TAB 7: 손익 분포 ===
+    with tab7:
+        st.subheader("🔔 손익 분포 (Profit/Loss Distribution)")
+        st.markdown("**\"왼쪽(손실)은 짧게, 오른쪽(수익)은 길게! 이것이 이상적인 곡선입니다.\"**")
+        bin_step = 2.5; df_dist = df.copy()
+        hist_chart = alt.Chart(df_dist).mark_bar().encode(
+            x=alt.X('ROI_Percent', bin=alt.Bin(step=bin_step), title='수익률 구간 (%)'),
+            y=alt.Y('count()', title='거래 횟수'),
+            color=alt.condition(alt.datum.ROI_Percent > 0, alt.value("#00AA00"), alt.value("#FF4444")),
+            tooltip=['count()', alt.Tooltip('ROI_Percent', bin=True, title='수익률 구간')]
+        ).properties(height=400)
+        rule = alt.Chart(pd.DataFrame({'x': [0]})).mark_rule(color='black', strokeDash=[2,2]).encode(x='x')
+        st.altair_chart(hist_chart + rule, use_container_width=True)
+        skew = df['ROI_Percent'].skew()
+        st.info(f"📊 **분포도 분석 (Skewness: {skew:.2f})**")
+        if skew > 0.5: st.success("✅ **[Positive Skew]** 아주 훌륭합니다! 꼬리가 오른쪽(수익)으로 길게 뻗은 이상적인 형태입니다.")
+        elif skew < -0.5: st.error("🚨 **[Negative Skew]** 위험합니다! 왼쪽(손실) 꼬리가 더 깁니다. 큰 손실 한 방을 조심하세요.")
+        else: st.warning("⚠️ **[Symmetric]** 수익과 손실 패턴이 비슷합니다. '손실은 짧게' 원칙을 더 지켜야 합니다.")
+
+else:
+    st.info("👈 사이드바 매매 기록을 입력하면 대시보드가 활성화됩니다.")
