@@ -1,3 +1,11 @@
 streamlit
 gspread
 google-auth
+st-gsheets-connection
+pandas
+numpy
+yfinance
+finance-datareader
+altair
+google-generativeai
+Pillow
