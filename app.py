@@ -30,20 +30,33 @@ doc = get_gspread_client()
 if doc is None:
     st.stop()
 
-# 3. 데이터 불러오기 및 저장 함수
+# 3. 데이터 불러오기 및 저장 함수 (🚨 김프로 철벽 방어 코드 추가)
 def load_journal_data():
     try:
         ws = doc.get_worksheet(0)
         data = ws.get_all_records()
+        
+        # 기대하는 새로운 컬럼 목록
+        expected_cols = [
+            'Date', 'Ticker', 'Buy_Price', 'Stop_Loss', 'Target_Price', 
+            'R_Multiple', 'VCP', 'Darvas', 'Volume_Surge', 'Emotion', 'Mistake', 'Reflection', 'Chart_Link'
+        ]
+        
         if not data:
-            return pd.DataFrame(columns=[
-                'Date', 'Ticker', 'Buy_Price', 'Stop_Loss', 'Target_Price', 
-                'R_Multiple', 'VCP', 'Darvas', 'Volume_Surge', 'Emotion', 'Mistake', 'Reflection', 'Chart_Link'
-            ])
+            return pd.DataFrame(columns=expected_cols)
+            
         df = pd.DataFrame(data)
-        # 구버전 시트에 Chart_Link 컬럼이 없을 경우를 대비한 방어막
-        if 'Chart_Link' not in df.columns:
-            df['Chart_Link'] = ""
+        
+        # 🚨 [핵심 에러 방어] 과거 206개 데이터에 새 컬럼이 없으면 강제로 빈칸 채워 넣기!
+        for col in expected_cols:
+            if col not in df.columns:
+                df[col] = ""
+                
+        # 숫자형 데이터는 에러 나지 않게 무조건 0으로 덮기
+        num_cols = ['Buy_Price', 'Stop_Loss', 'Target_Price', 'R_Multiple']
+        for col in num_cols:
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+            
         return df
     except Exception:
         return pd.DataFrame()
@@ -107,7 +120,7 @@ with st.sidebar.form("trend_journal_form", clear_on_submit=True):
                 'Volume_Surge': "O" if volume_surge else "X",
                 'Emotion': emotion,
                 'Mistake': mistake,
-                'Reflection': "", # 복기는 나중에 상세 페이지에서!
+                'Reflection': "", 
                 'Chart_Link': ""
             }])
             
@@ -150,50 +163,45 @@ with tab1:
 with tab2:
     st.subheader("💡 뼈저린 반성과 차트 복기")
     if not df.empty:
-        # 선택하기 쉽게 날짜+종목명으로 리스트 생성
-        df['Select_Label'] = df['Date'] + " | " + df['Ticker']
+        df['Select_Label'] = df['Date'].astype(str) + " | " + df['Ticker'].astype(str)
         trade_list = df['Select_Label'].tolist()
-        trade_list.reverse() # 최신순으로 정렬
+        trade_list.reverse() 
         
         selected_trade = st.selectbox("👇 복기할 종목을 선택해 주십시오", trade_list)
         
         if selected_trade:
-            # 선택한 종목의 데이터 뽑아오기
-            sel_date, sel_ticker = selected_trade.split(" | ")
-            target_idx = df[(df['Date'] == sel_date) & (df['Ticker'] == sel_ticker)].index[0]
+            sel_date, sel_ticker = selected_trade.split(" | ", 1)
+            target_idx = df[(df['Date'].astype(str) == sel_date) & (df['Ticker'].astype(str) == sel_ticker)].index[0]
             row_data = df.iloc[target_idx]
             
             st.markdown(f"### [{row_data['Ticker']}] 진입 타점 분석")
             
+            # 🚨 [핵심 에러 방어] 여기서 에러가 나지 않게 .get() 방식으로 한 번 더 안전장치!
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("매수가", f"{row_data['Buy_Price']:,.0f}원")
-            c2.metric("손절가", f"{row_data['Stop_Loss']:,.0f}원")
-            c3.metric("기대 R-배수", f"{row_data['R_Multiple']}R")
-            c4.metric("주요 실수", f"{row_data['Mistake']}")
+            c1.metric("매수가", f"{row_data.get('Buy_Price', 0):,.0f}원")
+            c2.metric("손절가", f"{row_data.get('Stop_Loss', 0):,.0f}원")
+            c3.metric("기대 R-배수", f"{row_data.get('R_Multiple', 0)}R")
+            c4.metric("주요 실수", f"{row_data.get('Mistake', '')}")
             
             st.divider()
             
-            # --- 상세 복기 폼 (구글 시트 업데이트 기능) ---
             with st.form("update_reflection_form"):
                 st.write("##### 📝 차트 링크 및 상세 반성문 추가")
                 
-                # 기존에 적어둔 내용이 있으면 불러옴
                 current_link = row_data.get('Chart_Link', '')
                 current_reflection = row_data.get('Reflection', '')
                 
-                new_chart_link = st.text_input("🔗 차트 이미지 링크 (TradingView, MTS 공유 링크 등)", value=current_link)
-                new_reflection = st.text_area("✍️ 상세 복기 노트 (진입 근거, 감정선, 아쉬운 점 딥다이브)", value=current_reflection, height=200)
+                new_chart_link = st.text_input("🔗 차트 이미지 링크 (TradingView, MTS 등)", value=str(current_link) if pd.notna(current_link) else "")
+                new_reflection = st.text_area("✍️ 상세 복기 노트 (진입 근거, 감정선 딥다이브)", value=str(current_reflection) if pd.notna(current_reflection) else "", height=200)
                 
                 update_btn = st.form_submit_button("복기 내용 덮어쓰기 (업데이트)")
                 
                 if update_btn:
                     with st.spinner("구글 시트에 복기 내용을 안전하게 업데이트 중입니다..."):
                         try:
-                            # 구글 시트는 1번부터 시작하고 헤더가 있으므로 인덱스 보정 (+2)
                             sheet_row_num = int(target_idx) + 2 
                             ws = doc.get_worksheet(0)
                             
-                            # Reflection은 12번째 컬럼, Chart_Link는 13번째 컬럼 (A=1, L=12, M=13)
                             ws.update_cell(sheet_row_num, 12, new_reflection)
                             ws.update_cell(sheet_row_num, 13, new_chart_link)
                             
@@ -201,8 +209,7 @@ with tab2:
                         except Exception as e:
                             st.error(f"업데이트 중 오류 발생: {e}")
                             
-            # 링크가 있으면 바로 누를 수 있게 버튼 제공
-            if pd.notna(current_link) and current_link.strip() != "":
+            if pd.notna(current_link) and str(current_link).strip() != "":
                 st.markdown(f"**[차트 확인하기]({current_link})** 👈 (터치 시 새 창으로 차트가 열립니다)")
     else:
         st.info("기록된 타점이 있어야 복기를 진행할 수 있습니다.")
