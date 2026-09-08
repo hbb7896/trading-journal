@@ -36,7 +36,6 @@ def load_journal_data():
         ws = doc.get_worksheet(0)
         list_of_lists = ws.get_all_values() 
         
-        # 🚨 Chart_Link 컬럼 추가 완료
         expected_cols = [
             'Date', 'Ticker', 'P_L_Amount', 'ROI_Percent', 
             'Memo', 'Mistake_Tags', 'Emotion', 'Discipline', 'Buy_Amount', 'Sell_Amount', 'Chart_Link'
@@ -130,7 +129,7 @@ with st.sidebar.form("trend_journal_form", clear_on_submit=True):
                 'Discipline': discipline,
                 'Buy_Amount': round(buy_amount, 2),
                 'Sell_Amount': round(sell_amount, 2),
-                'Chart_Link': "" # 신규 생성 시 빈칸으로 설정
+                'Chart_Link': "" 
             }
             
             if not df.empty:
@@ -211,9 +210,7 @@ with tab2:
                 current_emotion = row_data.get('Emotion', '')
                 current_link = row_data.get('Chart_Link', '')
                 
-                # 🚨 차트 링크 입력칸 추가 완료
                 new_chart_link = st.text_input("🔗 차트 이미지 링크 (Postimages 등에서 복사한 주소 붙여넣기)", value=str(current_link) if pd.notna(current_link) else "")
-                
                 new_memo = st.text_area("메모 및 상세 복기", value=str(current_memo) if pd.notna(current_memo) else "", height=150)
                 
                 col_left, col_right = st.columns(2)
@@ -225,31 +222,20 @@ with tab2:
                 update_btn = st.form_submit_button("구글 시트에 내용 및 차트 저장")
                 
                 if update_btn:
-                    with st.spinner("구글 시트에 업데이트 중입니다..."):
+                    with st.spinner("구글 시트에 전체 데이터를 안전하게 덮어쓰고 있습니다..."):
                         try:
-                            sheet_row_num = int(target_idx) + 2 
-                            ws = doc.get_worksheet(0)
+                            # 🚨 [가장 확실한 해결책] 찔끔찔끔 업데이트 버리고, 데이터를 완전히 덮어씌움!
+                            df.at[target_idx, 'Memo'] = new_memo
+                            df.at[target_idx, 'Mistake_Tags'] = new_mistake
+                            df.at[target_idx, 'Emotion'] = new_emotion
+                            df.at[target_idx, 'Chart_Link'] = new_chart_link
                             
-                            col_memo = df.columns.get_loc('Memo') + 1
-                            col_mistake = df.columns.get_loc('Mistake_Tags') + 1
-                            col_emotion = df.columns.get_loc('Emotion') + 1
-                            
-                            # 기존 시트에 Chart_Link 컬럼이 추가되었는지 확인 및 동적 할당
-                            if 'Chart_Link' not in df.columns:
-                                df['Chart_Link'] = ""
-                                ws.update_cell(1, len(df.columns), 'Chart_Link')
-                            col_link = df.columns.get_loc('Chart_Link') + 1
-                            
-                            ws.update_cell(sheet_row_num, col_memo, new_memo)
-                            ws.update_cell(sheet_row_num, col_mistake, new_mistake)
-                            ws.update_cell(sheet_row_num, col_emotion, new_emotion)
-                            ws.update_cell(sheet_row_num, col_link, new_chart_link)
+                            save_journal_data(df)
                             
                             st.success("✅ 완벽하게 업데이트되었습니다! (새로고침을 눌러 확인하세요)")
                         except Exception as e:
                             st.error(f"업데이트 중 오류 발생: {e}")
             
-            # 🚨 차트 이미지가 존재하면 화면에 띄워주기
             if pd.notna(current_link) and str(current_link).strip() != "":
                 st.markdown(f"**[🔗 차트 원본 새 창에서 열기]({current_link})** 👈 (터치 시 확대 가능)")
                 try:
