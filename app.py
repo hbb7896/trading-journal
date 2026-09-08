@@ -30,35 +30,48 @@ doc = get_gspread_client()
 if doc is None:
     st.stop()
 
-# 3. 데이터 불러오기 및 저장 함수 (🚨 김프로 철벽 방어 코드 추가)
+# 3. 데이터 불러오기 및 저장 함수 (🚨 불도저 스캐너 장착 완료)
 def load_journal_data():
     try:
         ws = doc.get_worksheet(0)
-        data = ws.get_all_records()
+        list_of_lists = ws.get_all_values() # 결벽증 함수 버리고, 무조건 다 긁어오는 함수로 교체!
         
-        # 기대하는 새로운 컬럼 목록
         expected_cols = [
             'Date', 'Ticker', 'Buy_Price', 'Stop_Loss', 'Target_Price', 
             'R_Multiple', 'VCP', 'Darvas', 'Volume_Surge', 'Emotion', 'Mistake', 'Reflection', 'Chart_Link'
         ]
         
-        if not data:
+        if not list_of_lists or len(list_of_lists) < 2:
             return pd.DataFrame(columns=expected_cols)
             
-        df = pd.DataFrame(data)
+        headers = list_of_lists[0]
+        data = list_of_lists[1:]
         
-        # 🚨 [핵심 에러 방어] 과거 206개 데이터에 새 컬럼이 없으면 강제로 빈칸 채워 넣기!
+        # 봇이 남긴 불규칙한 빈 칸이나 열 개수 차이를 강제 평탄화 (에러 원천 차단)
+        max_len = len(headers)
+        clean_data = []
+        for row in data:
+            if len(row) < max_len:
+                row.extend([""] * (max_len - len(row)))
+            elif len(row) > max_len:
+                row = row[:max_len]
+            clean_data.append(row)
+            
+        df = pd.DataFrame(clean_data, columns=headers)
+        
+        # 기존 봇 시트에는 없는, 새 시스템용 필수 컬럼들 자동 생성
         for col in expected_cols:
             if col not in df.columns:
                 df[col] = ""
                 
-        # 숫자형 데이터는 에러 나지 않게 무조건 0으로 덮기
+        # 연산에 필요한 숫자형 데이터 강제 변환
         num_cols = ['Buy_Price', 'Stop_Loss', 'Target_Price', 'R_Multiple']
         for col in num_cols:
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
             
         return df
-    except Exception:
+    except Exception as e:
+        st.error(f"🚨 데이터 로딩 중 문제가 발생했습니다: {e}")
         return pd.DataFrame()
 
 def save_journal_data(df):
@@ -176,7 +189,6 @@ with tab2:
             
             st.markdown(f"### [{row_data['Ticker']}] 진입 타점 분석")
             
-            # 🚨 [핵심 에러 방어] 여기서 에러가 나지 않게 .get() 방식으로 한 번 더 안전장치!
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("매수가", f"{row_data.get('Buy_Price', 0):,.0f}원")
             c2.metric("손절가", f"{row_data.get('Stop_Loss', 0):,.0f}원")
@@ -202,8 +214,17 @@ with tab2:
                             sheet_row_num = int(target_idx) + 2 
                             ws = doc.get_worksheet(0)
                             
-                            ws.update_cell(sheet_row_num, 12, new_reflection)
-                            ws.update_cell(sheet_row_num, 13, new_chart_link)
+                            # 동적 컬럼 인덱스 찾기 (기존 봇 데이터 보호)
+                            col_idx_reflection = df.columns.get_loc('Reflection') + 1
+                            col_idx_link = df.columns.get_loc('Chart_Link') + 1
+                            
+                            # 시트 최상단 헤더 보장
+                            ws.update_cell(1, col_idx_reflection, 'Reflection')
+                            ws.update_cell(1, col_idx_link, 'Chart_Link')
+                            
+                            # 실제 데이터 업데이트
+                            ws.update_cell(sheet_row_num, col_idx_reflection, new_reflection)
+                            ws.update_cell(sheet_row_num, col_idx_link, new_chart_link)
                             
                             st.success("✅ 상세 복기가 완벽하게 업데이트되었습니다! (새로고침을 누르시면 반영됩니다)")
                         except Exception as e:
