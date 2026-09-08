@@ -149,36 +149,15 @@ with st.sidebar.form("trend_journal_form", clear_on_submit=True):
             st.error("종목명을 입력해주세요.")
 
 # ==========================================
-# 5. 메인 화면: 탭 분리 (아카이브 vs 개별 복기룸)
+# 5. 메인 화면: 탭 분리 (순서 변경: 복기룸 1번, 아카이브 2번)
 # ==========================================
 st.title("📈 제이슨 대표님의 추세추종 센터")
 
-tab1, tab2 = st.tabs(["📋 전체 일지 아카이브", "🔍 개별 종목 상세 복기룸"])
+# 🚨 탭 순서를 대표님 지시대로 바꿨습니다!
+tab1, tab2 = st.tabs(["🔍 개별 종목 상세 복기룸", "📋 전체 일지 아카이브"])
 
-# --- TAB 1: 전체 아카이브 ---
+# --- TAB 1: 개별 종목 상세 복기룸 (메인 화면) ---
 with tab1:
-    if not df.empty:
-        st.subheader("모든 매매 기록 (최신순)")
-        if 'Date' in df.columns:
-            df_sorted = df.sort_values('Date', ascending=False)
-        else:
-            df_sorted = df
-            
-        st.dataframe(df_sorted.reset_index(drop=True), use_container_width=True)
-        
-        st.divider()
-        col1, col2, col3 = st.columns(3)
-        col1.metric("총 매매 횟수", f"{len(df):,}회")
-        total_pl = df['P_L_Amount'].sum() if 'P_L_Amount' in df.columns else 0
-        col2.metric("누적 총 손익", f"{total_pl:+,.0f}원")
-        win_trades = len(df[df['ROI_Percent'] > 0]) if 'ROI_Percent' in df.columns else 0
-        win_rate = (win_trades / len(df)) * 100 if len(df) > 0 else 0
-        col3.metric("승률", f"{win_rate:.1f}%")
-    else:
-        st.info("기록된 일지가 없습니다.")
-
-# --- TAB 2: 개별 종목 상세 복기룸 ---
-with tab2:
     st.subheader("💡 개별 종목 상세 복기 및 차트 첨부")
     if not df.empty and 'Date' in df.columns and 'Ticker' in df.columns:
         df['Select_Label'] = df['Date'].astype(str) + " | " + df['Ticker'].astype(str)
@@ -197,9 +176,8 @@ with tab2:
             current_mistake = row_data.get('Mistake_Tags', '')
             current_emotion = row_data.get('Emotion', '')
             
-            # 🚨 [위치 이동] 차트 이미지를 종목 선택 바로 밑으로 끌어올림!
             if pd.notna(current_link) and str(current_link).strip() != "":
-                st.markdown("<br>", unsafe_allow_html=True) # 위아래 여백 살짝 줌
+                st.markdown("<br>", unsafe_allow_html=True) 
                 try:
                     st.image(str(current_link), caption=f"📸 {row_data.get('Ticker', '')} 매매 차트", use_container_width=True)
                     st.markdown(f"**[🔗 차트 원본 크게 보기]({current_link})** 👈 (터치 시 확대)")
@@ -246,3 +224,25 @@ with tab2:
                             st.error(f"업데이트 중 오류 발생: {e}")
     else:
         st.info("표시할 수 있는 타점 데이터가 없습니다.")
+
+# --- TAB 2: 전체 아카이브 ---
+with tab2:
+    if not df.empty:
+        st.subheader("모든 매매 기록 (최신순)")
+        if 'Date' in df.columns:
+            df_sorted = df.sort_values('Date', ascending=False)
+        else:
+            df_sorted = df
+            
+        st.dataframe(df_sorted.reset_index(drop=True), use_container_width=True)
+        
+        st.divider()
+        col1, col2, col3 = st.columns(3)
+        col1.metric("총 매매 횟수", f"{len(df):,}회")
+        total_pl = df['P_L_Amount'].sum() if 'P_L_Amount' in df.columns else 0
+        col2.metric("누적 총 손익", f"{total_pl:+,.0f}원")
+        win_trades = len(df[df['ROI_Percent'] > 0]) if 'ROI_Percent' in df.columns else 0
+        win_rate = (win_trades / len(df)) * 100 if len(df) > 0 else 0
+        col3.metric("승률", f"{win_rate:.1f}%")
+    else:
+        st.info("기록된 일지가 없습니다.")
