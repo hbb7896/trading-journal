@@ -30,11 +30,11 @@ doc = get_gspread_client()
 if doc is None:
     st.stop()
 
-# 3. 데이터 불러오기 및 저장 함수 (🚨 불도저 스캐너 장착 완료)
+# 3. 데이터 불러오기 및 저장 함수 (🚨 중복 열 이름 해결 특효약 투여)
 def load_journal_data():
     try:
         ws = doc.get_worksheet(0)
-        list_of_lists = ws.get_all_values() # 결벽증 함수 버리고, 무조건 다 긁어오는 함수로 교체!
+        list_of_lists = ws.get_all_values() 
         
         expected_cols = [
             'Date', 'Ticker', 'Buy_Price', 'Stop_Loss', 'Target_Price', 
@@ -44,11 +44,18 @@ def load_journal_data():
         if not list_of_lists or len(list_of_lists) < 2:
             return pd.DataFrame(columns=expected_cols)
             
-        headers = list_of_lists[0]
+        # [핵심 수술 부위] 중복된 헤더 이름이 있으면 뒤에 숫자를 붙여 강제로 중복을 없앰
+        raw_headers = list_of_lists[0]
+        safe_headers = []
+        for i, h in enumerate(raw_headers):
+            h_str = str(h).strip() if h else f"Unnamed_{i}" # 빈칸은 Unnamed로 대체
+            if h_str in safe_headers:
+                h_str = f"{h_str}_{i}" # 중복되면 숫자를 붙임
+            safe_headers.append(h_str)
+
         data = list_of_lists[1:]
         
-        # 봇이 남긴 불규칙한 빈 칸이나 열 개수 차이를 강제 평탄화 (에러 원천 차단)
-        max_len = len(headers)
+        max_len = len(safe_headers)
         clean_data = []
         for row in data:
             if len(row) < max_len:
@@ -57,17 +64,17 @@ def load_journal_data():
                 row = row[:max_len]
             clean_data.append(row)
             
-        df = pd.DataFrame(clean_data, columns=headers)
+        # 중복 없는 안전한 헤더로 데이터프레임 생성
+        df = pd.DataFrame(clean_data, columns=safe_headers)
         
-        # 기존 봇 시트에는 없는, 새 시스템용 필수 컬럼들 자동 생성
         for col in expected_cols:
             if col not in df.columns:
                 df[col] = ""
                 
-        # 연산에 필요한 숫자형 데이터 강제 변환
         num_cols = ['Buy_Price', 'Stop_Loss', 'Target_Price', 'R_Multiple']
         for col in num_cols:
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
             
         return df
     except Exception as e:
@@ -121,7 +128,7 @@ with st.sidebar.form("trend_journal_form", clear_on_submit=True):
     
     if submitted:
         if ticker and buy_price > 0 and stop_loss > 0:
-            new_row = pd.DataFrame([{
+            new_row_data = {
                 'Date': trade_date.strftime('%Y-%m-%d'),
                 'Ticker': ticker,
                 'Buy_Price': buy_price,
@@ -135,11 +142,16 @@ with st.sidebar.form("trend_journal_form", clear_on_submit=True):
                 'Mistake': mistake,
                 'Reflection': "", 
                 'Chart_Link': ""
-            }])
+            }
             
             if not df.empty:
+                for col in df.columns:
+                    if col not in new_row_data:
+                        new_row_data[col] = "" 
+                new_row = pd.DataFrame([new_row_data])
                 updated_df = pd.concat([df, new_row], ignore_index=True)
             else:
+                new_row = pd.DataFrame([new_row_data])
                 updated_df = new_row
                 
             save_journal_data(updated_df)
@@ -159,8 +171,13 @@ tab1, tab2 = st.tabs(["📋 전체 일지 아카이브", "🔍 개별 종목 상
 with tab1:
     if not df.empty:
         st.subheader("모든 매매 기록 (최신순)")
-        df_sorted = df.sort_values('Date', ascending=False)
-        st.dataframe(df_sorted, use_container_width=True, hide_index=True)
+        if 'Date' in df.columns:
+            df_sorted = df.sort_values('Date', ascending=False)
+        else:
+            df_sorted = df
+            
+        # 오류 방지를 위해 인덱스 리셋 후 표출
+        st.dataframe(df_sorted.reset_index(drop=True), use_container_width=True)
         
         st.divider()
         col1, col2, col3 = st.columns(3)
@@ -175,7 +192,7 @@ with tab1:
 # --- TAB 2: 개별 종목 상세 복기룸 ---
 with tab2:
     st.subheader("💡 뼈저린 반성과 차트 복기")
-    if not df.empty:
+    if not df.empty and 'Date' in df.columns and 'Ticker' in df.columns:
         df['Select_Label'] = df['Date'].astype(str) + " | " + df['Ticker'].astype(str)
         trade_list = df['Select_Label'].tolist()
         trade_list.reverse() 
@@ -187,7 +204,7 @@ with tab2:
             target_idx = df[(df['Date'].astype(str) == sel_date) & (df['Ticker'].astype(str) == sel_ticker)].index[0]
             row_data = df.iloc[target_idx]
             
-            st.markdown(f"### [{row_data['Ticker']}] 진입 타점 분석")
+            st.markdown(f"### [{row_data.get('Ticker', '')}] 진입 타점 분석")
             
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("매수가", f"{row_data.get('Buy_Price', 0):,.0f}원")
@@ -209,20 +226,17 @@ with tab2:
                 update_btn = st.form_submit_button("복기 내용 덮어쓰기 (업데이트)")
                 
                 if update_btn:
-                    with st.spinner("구글 시트에 복기 내용을 안전하게 업데이트 중입니다..."):
+                    with st.spinner("구글 시트에 복기 내용을 업데이트 중입니다..."):
                         try:
                             sheet_row_num = int(target_idx) + 2 
                             ws = doc.get_worksheet(0)
                             
-                            # 동적 컬럼 인덱스 찾기 (기존 봇 데이터 보호)
                             col_idx_reflection = df.columns.get_loc('Reflection') + 1
                             col_idx_link = df.columns.get_loc('Chart_Link') + 1
                             
-                            # 시트 최상단 헤더 보장
                             ws.update_cell(1, col_idx_reflection, 'Reflection')
                             ws.update_cell(1, col_idx_link, 'Chart_Link')
                             
-                            # 실제 데이터 업데이트
                             ws.update_cell(sheet_row_num, col_idx_reflection, new_reflection)
                             ws.update_cell(sheet_row_num, col_idx_link, new_chart_link)
                             
@@ -233,4 +247,4 @@ with tab2:
             if pd.notna(current_link) and str(current_link).strip() != "":
                 st.markdown(f"**[차트 확인하기]({current_link})** 👈 (터치 시 새 창으로 차트가 열립니다)")
     else:
-        st.info("기록된 타점이 있어야 복기를 진행할 수 있습니다.")
+        st.info("표시할 수 있는 타점 데이터가 없습니다.")
