@@ -30,17 +30,20 @@ doc = get_gspread_client()
 if doc is None:
     st.stop()
 
-# 3. 데이터 불러오기 및 저장 함수 (대표님 시트 컬럼 완벽 호환)
+# 3. 데이터 불러오기 및 저장 함수 
 def load_journal_data():
     try:
         ws = doc.get_worksheet(0)
         list_of_lists = ws.get_all_values() 
         
+        # 🚨 Chart_Link 컬럼 추가 완료
+        expected_cols = [
+            'Date', 'Ticker', 'P_L_Amount', 'ROI_Percent', 
+            'Memo', 'Mistake_Tags', 'Emotion', 'Discipline', 'Buy_Amount', 'Sell_Amount', 'Chart_Link'
+        ]
+        
         if not list_of_lists or len(list_of_lists) < 2:
-            return pd.DataFrame(columns=[
-                'Date', 'Ticker', 'P_L_Amount', 'ROI_Percent', 
-                'Memo', 'Mistake_Tags', 'Emotion', 'Discipline', 'Buy_Amount', 'Sell_Amount'
-            ])
+            return pd.DataFrame(columns=expected_cols)
             
         raw_headers = list_of_lists[0]
         safe_headers = []
@@ -62,13 +65,10 @@ def load_journal_data():
             
         df = pd.DataFrame(clean_data, columns=safe_headers)
         
-        # 필수 컬럼 방어막
-        expected_cols = ['Date', 'Ticker', 'P_L_Amount', 'ROI_Percent', 'Memo', 'Mistake_Tags', 'Emotion', 'Discipline', 'Buy_Amount', 'Sell_Amount']
         for col in expected_cols:
             if col not in df.columns:
                 df[col] = ""
                 
-        # 숫자형 데이터 변환
         num_cols = ['P_L_Amount', 'ROI_Percent', 'Buy_Amount', 'Sell_Amount']
         for col in num_cols:
             if col in df.columns:
@@ -91,7 +91,7 @@ def save_journal_data(df):
 df = load_journal_data()
 
 # ==========================================
-# 4. 사이드바: 신규 매매 기록 입력 폼 (대표님 시트 양식 맞춤)
+# 4. 사이드바: 신규 매매 기록 입력 폼 
 # ==========================================
 st.sidebar.header("📝 신규 매매 기록 입력")
 with st.sidebar.form("trend_journal_form", clear_on_submit=True):
@@ -102,7 +102,6 @@ with st.sidebar.form("trend_journal_form", clear_on_submit=True):
     buy_amount = st.number_input("총 매수 금액 (원)", min_value=0.0, step=100000.0)
     roi_percent = st.number_input("수익률 (%)", value=0.0, format="%.2f")
     
-    # 실시간 자동 계산 미리보기
     p_l_amount = 0.0
     sell_amount = 0.0
     if buy_amount > 0:
@@ -130,7 +129,8 @@ with st.sidebar.form("trend_journal_form", clear_on_submit=True):
                 'Emotion': emotion,
                 'Discipline': discipline,
                 'Buy_Amount': round(buy_amount, 2),
-                'Sell_Amount': round(sell_amount, 2)
+                'Sell_Amount': round(sell_amount, 2),
+                'Chart_Link': "" # 신규 생성 시 빈칸으로 설정
             }
             
             if not df.empty:
@@ -144,7 +144,7 @@ with st.sidebar.form("trend_journal_form", clear_on_submit=True):
                 updated_df = new_row
                 
             save_journal_data(updated_df)
-            st.success(f"[{ticker}] 기록이 안전하게 저장되었습니다! 🫡")
+            st.success(f"[{ticker}] 기록이 안전하게 저장되었습니다! 복기룸에서 차트를 추가해보세요. 🫡")
             st.rerun()
         else:
             st.error("종목명을 입력해주세요.")
@@ -180,7 +180,7 @@ with tab1:
 
 # --- TAB 2: 개별 종목 상세 복기룸 ---
 with tab2:
-    st.subheader("💡 개별 종목 상세 복기 및 메모 수정")
+    st.subheader("💡 개별 종목 상세 복기 및 차트 첨부")
     if not df.empty and 'Date' in df.columns and 'Ticker' in df.columns:
         df['Select_Label'] = df['Date'].astype(str) + " | " + df['Ticker'].astype(str)
         trade_list = df['Select_Label'].tolist()
@@ -204,17 +204,25 @@ with tab2:
             st.divider()
             
             with st.form("update_memo_form"):
-                st.write("##### 📝 메모 및 복기 내용 수정")
+                st.write("##### 📝 메모 및 복기 차트 업데이트")
                 
                 current_memo = row_data.get('Memo', '')
                 current_mistake = row_data.get('Mistake_Tags', '')
                 current_emotion = row_data.get('Emotion', '')
+                current_link = row_data.get('Chart_Link', '')
+                
+                # 🚨 차트 링크 입력칸 추가 완료
+                new_chart_link = st.text_input("🔗 차트 이미지 링크 (Postimages 등에서 복사한 주소 붙여넣기)", value=str(current_link) if pd.notna(current_link) else "")
                 
                 new_memo = st.text_area("메모 및 상세 복기", value=str(current_memo) if pd.notna(current_memo) else "", height=150)
-                new_mistake = st.text_input("실수 태그", value=str(current_mistake) if pd.notna(current_mistake) else "")
-                new_emotion = st.text_input("심리 상태", value=str(current_emotion) if pd.notna(current_emotion) else "")
                 
-                update_btn = st.form_submit_button("구글 시트에 내용 업데이트")
+                col_left, col_right = st.columns(2)
+                with col_left:
+                    new_mistake = st.text_input("실수 태그", value=str(current_mistake) if pd.notna(current_mistake) else "")
+                with col_right:
+                    new_emotion = st.text_input("심리 상태", value=str(current_emotion) if pd.notna(current_emotion) else "")
+                
+                update_btn = st.form_submit_button("구글 시트에 내용 및 차트 저장")
                 
                 if update_btn:
                     with st.spinner("구글 시트에 업데이트 중입니다..."):
@@ -226,12 +234,27 @@ with tab2:
                             col_mistake = df.columns.get_loc('Mistake_Tags') + 1
                             col_emotion = df.columns.get_loc('Emotion') + 1
                             
+                            # 기존 시트에 Chart_Link 컬럼이 추가되었는지 확인 및 동적 할당
+                            if 'Chart_Link' not in df.columns:
+                                df['Chart_Link'] = ""
+                                ws.update_cell(1, len(df.columns), 'Chart_Link')
+                            col_link = df.columns.get_loc('Chart_Link') + 1
+                            
                             ws.update_cell(sheet_row_num, col_memo, new_memo)
                             ws.update_cell(sheet_row_num, col_mistake, new_mistake)
                             ws.update_cell(sheet_row_num, col_emotion, new_emotion)
+                            ws.update_cell(sheet_row_num, col_link, new_chart_link)
                             
                             st.success("✅ 완벽하게 업데이트되었습니다! (새로고침을 눌러 확인하세요)")
                         except Exception as e:
                             st.error(f"업데이트 중 오류 발생: {e}")
+            
+            # 🚨 차트 이미지가 존재하면 화면에 띄워주기
+            if pd.notna(current_link) and str(current_link).strip() != "":
+                st.markdown(f"**[🔗 차트 원본 새 창에서 열기]({current_link})** 👈 (터치 시 확대 가능)")
+                try:
+                    st.image(str(current_link), caption=f"{row_data.get('Ticker', '')} 진입/청산 차트", use_container_width=True)
+                except:
+                    st.warning("⚠️ 차트 이미지를 불러올 수 없습니다. 링크가 올바른 이미지 주소(jpg, png 등)인지 확인해주세요.")
     else:
         st.info("표시할 수 있는 타점 데이터가 없습니다.")
