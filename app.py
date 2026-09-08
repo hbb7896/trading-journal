@@ -192,6 +192,21 @@ with tab2:
             target_idx = df[(df['Date'].astype(str) == sel_date) & (df['Ticker'].astype(str) == sel_ticker)].index[0]
             row_data = df.iloc[target_idx]
             
+            current_link = row_data.get('Chart_Link', '')
+            current_memo = row_data.get('Memo', '')
+            current_mistake = row_data.get('Mistake_Tags', '')
+            current_emotion = row_data.get('Emotion', '')
+            
+            # 🚨 [위치 이동] 차트 이미지를 종목 선택 바로 밑으로 끌어올림!
+            if pd.notna(current_link) and str(current_link).strip() != "":
+                st.markdown("<br>", unsafe_allow_html=True) # 위아래 여백 살짝 줌
+                try:
+                    st.image(str(current_link), caption=f"📸 {row_data.get('Ticker', '')} 매매 차트", use_container_width=True)
+                    st.markdown(f"**[🔗 차트 원본 크게 보기]({current_link})** 👈 (터치 시 확대)")
+                except:
+                    st.warning("⚠️ 차트 이미지를 불러올 수 없습니다. 링크가 올바른 이미지 주소(jpg, png 등)인지 확인해주세요.")
+                st.divider()
+            
             st.markdown(f"### [{row_data.get('Ticker', '')}] 거래 상세 분석")
             
             c1, c2, c3, c4 = st.columns(4)
@@ -204,11 +219,6 @@ with tab2:
             
             with st.form("update_memo_form"):
                 st.write("##### 📝 메모 및 복기 차트 업데이트")
-                
-                current_memo = row_data.get('Memo', '')
-                current_mistake = row_data.get('Mistake_Tags', '')
-                current_emotion = row_data.get('Emotion', '')
-                current_link = row_data.get('Chart_Link', '')
                 
                 new_chart_link = st.text_input("🔗 차트 이미지 링크 (Postimages 등에서 복사한 주소 붙여넣기)", value=str(current_link) if pd.notna(current_link) else "")
                 new_memo = st.text_area("메모 및 상세 복기", value=str(current_memo) if pd.notna(current_memo) else "", height=150)
@@ -224,7 +234,6 @@ with tab2:
                 if update_btn:
                     with st.spinner("구글 시트에 전체 데이터를 안전하게 덮어쓰고 있습니다..."):
                         try:
-                            # 🚨 [가장 확실한 해결책] 찔끔찔끔 업데이트 버리고, 데이터를 완전히 덮어씌움!
                             df.at[target_idx, 'Memo'] = new_memo
                             df.at[target_idx, 'Mistake_Tags'] = new_mistake
                             df.at[target_idx, 'Emotion'] = new_emotion
@@ -235,12 +244,5 @@ with tab2:
                             st.success("✅ 완벽하게 업데이트되었습니다! (새로고침을 눌러 확인하세요)")
                         except Exception as e:
                             st.error(f"업데이트 중 오류 발생: {e}")
-            
-            if pd.notna(current_link) and str(current_link).strip() != "":
-                st.markdown(f"**[🔗 차트 원본 새 창에서 열기]({current_link})** 👈 (터치 시 확대 가능)")
-                try:
-                    st.image(str(current_link), caption=f"{row_data.get('Ticker', '')} 진입/청산 차트", use_container_width=True)
-                except:
-                    st.warning("⚠️ 차트 이미지를 불러올 수 없습니다. 링크가 올바른 이미지 주소(jpg, png 등)인지 확인해주세요.")
     else:
         st.info("표시할 수 있는 타점 데이터가 없습니다.")
